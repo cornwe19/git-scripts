@@ -1,0 +1,116 @@
+#!/bin/bash
+#
+# git-amend-old — fold staged changes into an older commit.
+#
+# Stages-then-rebases your currently-staged changes into a target commit
+# further back in history, preserving everything that came after it.
+#
+# Adapted from work by Colin O'Dell (2014).
+#
+# Usage:
+#   git amend-old <target-ref>     Fold staged changes into <target-ref>.
+#   git amend-old -h               Show this help.
+#
+# Preconditions:
+#   - You are on a (non-detached) branch.
+#   - <target-ref> is an ancestor of HEAD.
+#   - You have staged the changes you want folded in (git add ...).
+#
+# Behavior on failure: any partial state is rolled back.
+
+set -u
+
+print_help() {
+    sed -n '2,/^# Behavior/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-}" in
+    -h|--help)
+        print_help
+        exit 0
+        ;;
+    "")
+        echo "error: missing target commit" >&2
+        echo "run 'git amend-old --help' for usage" >&2
+        exit 2
+        ;;
+esac
+
+TARGET=$1
+
+if ! TARGET_SHA=$(git rev-parse --verify --quiet "${TARGET}^{commit}" 2>/dev/null); then
+    echo "error: '$TARGET' is not a valid commit" >&2
+    exit 2
+fi
+
+PREVBRANCH=$(git symbolic-ref --short HEAD 2>/dev/null) || {
+    echo "error: detached HEAD — checkout a branch before running" >&2
+    exit 2
+}
+
+if ! git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
+    echo "error: '$TARGET' is not an ancestor of HEAD" >&2
+    exit 2
+fi
+
+if git diff --cached --quiet; then
+    echo "error: no staged changes — run 'git add <files>' first" >&2
+    exit 2
+fi
+
+ORIG_SHA=$(git rev-parse HEAD)
+TMPBRANCH="amend-old-tmp-$$-$RANDOM"
+STASHED=0
+
+cleanup_on_failure() {
+    set +e
+    local gitdir
+    gitdir=$(git rev-parse --git-dir 2>/dev/null)
+    # Abort any in-progress rebase
+    if [ -d "$gitdir/rebase-merge" ] || [ -d "$gitdir/rebase-apply" ]; then
+        git rebase --abort 2>/dev/null
+    fi
+    # Detach + force-reset PREVBRANCH back to its starting SHA
+    git checkout --quiet "$ORIG_SHA" 2>/dev/null
+    git branch -f "$PREVBRANCH" "$ORIG_SHA" 2>/dev/null
+    git checkout --quiet "$PREVBRANCH" 2>/dev/null
+    git branch -D "$TMPBRANCH" 2>/dev/null
+    if [ "$STASHED" = "1" ]; then
+        git stash pop --quiet 2>/dev/null || \
+            echo "warning: stash pop failed — see 'git stash list'" >&2
+    fi
+}
+trap cleanup_on_failure ERR INT TERM
+
+set -e
+
+# Snapshot the staged changes as a temporary commit
+git commit -m "amend-old WIP $TARGET_SHA" >/dev/null
+NEWCHANGES=$(git rev-parse HEAD)
+
+# Stash anything still dirty (modified-but-not-staged or untracked)
+if [ -n "$(git status --porcelain)" ]; then
+    git stash push --include-untracked --quiet -m "amend-old leftovers"
+    STASHED=1
+fi
+
+# On a tmp branch, rewind to target and fold the WIP diff into target via amend
+git checkout -b "$TMPBRANCH" --quiet
+git reset --hard --quiet "$TARGET_SHA"
+git cherry-pick -n --quiet "$NEWCHANGES"
+git commit --amend --no-edit --quiet
+
+# Back to original branch, drop the WIP commit, then rebase its real commits
+# (everything between TARGET and the original tip) onto the amended target.
+git checkout --quiet "$PREVBRANCH"
+git reset --hard --quiet HEAD~
+git rebase --quiet --onto "$TMPBRANCH" "$TARGET_SHA"
+
+# Past the danger zone — drop the trap and finish
+trap - ERR INT TERM
+git branch -d "$TMPBRANCH" >/dev/null
+if [ "$STASHED" = "1" ]; then
+    git stash pop --quiet
+fi
+
+echo "Folded staged changes into $TARGET_SHA on $PREVBRANCH."

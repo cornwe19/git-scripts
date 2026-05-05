@@ -1,0 +1,56 @@
+#!/bin/bash
+#
+# git-branchrename — rename the current branch locally and on the remote.
+#
+# Renames the current branch to <new-name> locally, pushes the new name to the
+# tracked remote (setting upstream), then deletes the old name on the remote.
+# If the current branch has no upstream, the local rename happens but no remote
+# operations are attempted.
+#
+# Usage:
+#   git branchrename <new-name>     Rename current branch to <new-name>.
+#   git branchrename -h             Show this help.
+
+set -eu
+
+print_help() {
+    sed -n '2,/^# Usage:/p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//' | tail -n +2
+}
+
+case "${1:-}" in
+    -h|--help)
+        print_help
+        exit 0
+        ;;
+    "")
+        echo "error: missing new branch name" >&2
+        echo "run 'git branchrename --help' for usage" >&2
+        exit 2
+        ;;
+esac
+
+NEW=$1
+OLD=$(git symbolic-ref --short HEAD 2>/dev/null) || {
+    echo "error: detached HEAD — checkout a branch before renaming" >&2
+    exit 2
+}
+
+if [ "$OLD" = "$NEW" ]; then
+    echo "error: new name is the same as the current branch ($OLD)" >&2
+    exit 2
+fi
+
+UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || true)
+
+git branch -m "$NEW"
+
+if [ -z "$UPSTREAM" ]; then
+    echo "Renamed locally. No upstream was set, so nothing to push."
+    exit 0
+fi
+
+REMOTE=${UPSTREAM%%/*}
+git push -u "$REMOTE" "$NEW"
+git push "$REMOTE" --delete "$OLD"
+echo "Renamed $OLD -> $NEW (local + $REMOTE)."

@@ -1,0 +1,122 @@
+#!/bin/bash
+#
+# git-branchclean — prune local branches whose upstream is gone.
+#
+# Workflow:
+#   1. fetch --prune (and prune stale worktree metadata)
+#   2. for each branch with upstream "[gone]":
+#        - if a worktree references it: try to remove. If dirty, list the
+#          changed files and prompt before force-removing.
+#        - try `git branch -d` (safe). On failure:
+#            - if the diff is already on the default branch (squash-merge
+#              detection via commit-tree + cherry), force-delete silently.
+#            - otherwise list the unmerged commits and prompt before -D.
+#
+# Default branch is taken from origin/HEAD; falls back to main/master/develop.
+#
+# Usage:
+#   git branchclean        Run the cleanup.
+#   git branchclean -h     Show this help.
+
+case "${1:-}" in
+    -h|--help)
+        sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0
+        ;;
+esac
+
+git fetch --prune
+git worktree prune
+
+default_ref=$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)
+if [ -z "$default_ref" ]; then
+    for candidate in origin/main origin/master origin/develop; do
+        if git rev-parse --verify --quiet "$candidate" >/dev/null; then
+            default_ref="refs/remotes/$candidate"
+            break
+        fi
+    done
+fi
+
+is_squash_merged() {
+    local branch=$1
+    [ -z "$default_ref" ] && return 1
+
+    local merge_base squashed_tree base_tree squashed_commit cherry
+    merge_base=$(git merge-base "$default_ref" "$branch" 2>/dev/null) || return 1
+    squashed_tree=$(git rev-parse "$branch^{tree}" 2>/dev/null) || return 1
+    base_tree=$(git rev-parse "$merge_base^{tree}" 2>/dev/null) || return 1
+
+    # Empty diff against base => already-merged ancestor
+    [ "$squashed_tree" = "$base_tree" ] && return 0
+
+    squashed_commit=$(git commit-tree "$squashed_tree" -p "$merge_base" -m _ 2>/dev/null) || return 1
+    cherry=$(git cherry "$default_ref" "$squashed_commit" 2>/dev/null)
+    [[ "$cherry" == -* ]]
+}
+
+for branch in $(git for-each-ref --format '%(refname) %(upstream:track)' refs/heads | awk '$2 == "[gone]" {sub("refs/heads/", "", $1); print $1}'); do
+    worktree_path=$(git worktree list --porcelain | awk -v branch="refs/heads/$branch" '
+        /^worktree / { current = substr($0, 10) }
+        /^branch / && $2 == branch { print current; exit }
+    ')
+
+    if [ -n "$worktree_path" ]; then
+        # The main worktree's .git is a directory; linked worktrees have a .git
+        # FILE (gitlink). `git worktree remove` refuses on the main worktree, so
+        # if we'd hit it, surface a clear message and skip rather than spam errors.
+        if [ -d "$worktree_path/.git" ]; then
+            echo "Branch $branch is checked out in the main worktree at $worktree_path"
+            echo "  switch off it (e.g. 'git checkout ${default_ref#refs/remotes/origin/}') and rerun"
+            continue
+        fi
+        force=""
+        if [ -d "$worktree_path" ]; then
+            dirty=$(git -C "$worktree_path" status --porcelain 2>/dev/null)
+            if [ -n "$dirty" ]; then
+                echo "Worktree at $worktree_path has uncommitted changes:"
+                echo "$dirty" | sed 's/^/  /'
+                printf "Force-remove worktree and delete branch %s? [y/N] " "$branch"
+                read -r reply </dev/tty
+                case "$reply" in
+                    y|Y|yes|YES) force="--force" ;;
+                    *) echo "  skipping $branch"; continue ;;
+                esac
+            fi
+        fi
+        echo "Removing worktree at $worktree_path for branch $branch"
+        if ! git worktree remove $force "$worktree_path"; then
+            echo "  failed to remove worktree, skipping $branch"
+            continue
+        fi
+    fi
+
+    if delete_output=$(git branch -d "$branch" 2>&1); then
+        echo "$delete_output"
+        continue
+    fi
+
+    if is_squash_merged "$branch"; then
+        git branch -D "$branch"
+        continue
+    fi
+
+    if [ -n "$default_ref" ]; then
+        unmerged=$(git log --oneline "$branch" "^$default_ref" 2>/dev/null)
+    else
+        unmerged=$(git log --oneline -5 "$branch" 2>/dev/null)
+    fi
+    if [ -n "$unmerged" ]; then
+        echo "Branch $branch has unmerged commits:"
+        echo "$unmerged" | sed 's/^/  /'
+        printf "Force-delete branch %s? [y/N] " "$branch"
+        read -r reply </dev/tty
+        case "$reply" in
+            y|Y|yes|YES) git branch -D "$branch" ;;
+            *) echo "  skipping $branch" ;;
+        esac
+    else
+        echo "$delete_output"
+        git branch -D "$branch"
+    fi
+done

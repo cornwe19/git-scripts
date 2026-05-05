@@ -1,0 +1,120 @@
+#!/bin/bash
+#
+# git-heartbeat — pull latest on current and master, then merge/rebase master
+# into the current branch.
+#
+# If <master-branch> is omitted, we infer it from origin/HEAD (falling back to
+# main, master, develop in that order).
+#
+# If a heartbeat conflicts, the script stops with the conflict in place — but
+# any stash created with -s is always popped, even on failure, so your
+# uncommitted work is never stranded.
+#
+# Usage:
+#   git heartbeat [<master-branch>] [-r] [-s]
+#     -r   rebase instead of merge
+#     -s   stash uncommitted changes first; reapply on exit (success or fail)
+#   git heartbeat -h
+#
+# Examples:
+#   git heartbeat              # auto-detect master, merge into current
+#   git heartbeat develop      # merge develop into current
+#   git heartbeat -r -s        # stash, rebase, unstash
+
+set -u
+
+print_help() {
+    sed -n '2,/^# Examples:/p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '/^# Examples:/,/^$/p' "$0" | sed 's/^# \{0,1\}//' | tail -n +2
+}
+
+# Parse args. First non-flag positional is the master branch.
+MASTER=""
+ACTION="merge --no-ff"
+STASH=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help) print_help; exit 0 ;;
+        -r) ACTION="rebase" ;;
+        -s) STASH=true ;;
+        --) shift; MASTER=${1:-$MASTER}; break ;;
+        -*) echo "error: unknown flag $1" >&2; exit 2 ;;
+        *)
+            if [ -z "$MASTER" ]; then
+                MASTER=$1
+            else
+                echo "error: unexpected argument $1" >&2; exit 2
+            fi
+            ;;
+    esac
+    shift
+done
+
+# Default master detection
+if [ -z "$MASTER" ]; then
+    if default_ref=$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null); then
+        MASTER=${default_ref#refs/remotes/origin/}
+    else
+        for candidate in main master develop; do
+            if git rev-parse --verify --quiet "refs/heads/$candidate" >/dev/null; then
+                MASTER=$candidate
+                break
+            fi
+        done
+    fi
+fi
+if [ -z "$MASTER" ]; then
+    echo "error: could not determine master branch — pass it explicitly" >&2
+    exit 2
+fi
+
+CURRENT=$(git symbolic-ref --short HEAD 2>/dev/null) || {
+    echo "error: detached HEAD — checkout a branch first" >&2
+    exit 2
+}
+
+if [ "$CURRENT" = "$MASTER" ]; then
+    echo "error: already on $MASTER — heartbeat into a different branch" >&2
+    exit 2
+fi
+
+if ! git rev-parse --verify --quiet "refs/heads/$MASTER" >/dev/null; then
+    echo "error: branch '$MASTER' does not exist locally" >&2
+    exit 2
+fi
+
+# Decide stash state up-front; only stash if -s AND there's something to stash
+DID_STASH=0
+if $STASH && [ -n "$(git status --porcelain)" ]; then
+    echo "Stashing uncommitted changes"
+    git stash push --include-untracked --quiet -m "heartbeat $CURRENT"
+    DID_STASH=1
+fi
+
+restore_stash() {
+    if [ "$DID_STASH" = "1" ]; then
+        git stash pop --quiet 2>/dev/null || \
+            echo "warning: stash pop failed — your changes are still in 'git stash list'" >&2
+    fi
+}
+trap restore_stash EXIT
+
+# Pull current (only if it has an upstream)
+if git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" >/dev/null 2>&1; then
+    echo "Pulling latest on $CURRENT"
+    git pull -q --rebase
+fi
+
+git checkout --quiet "$MASTER"
+echo "Pulling latest on $MASTER"
+if git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" >/dev/null 2>&1; then
+    git pull -q --rebase
+fi
+git checkout --quiet "$CURRENT"
+
+echo "Performing '$ACTION' $MASTER -> $CURRENT"
+if ! git $ACTION "$MASTER"; then
+    echo "error: $ACTION failed — resolve conflicts then continue manually" >&2
+    exit 1
+fi

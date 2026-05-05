@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# Install the scripts in this repo as `git` subcommands and (optionally) set
+# this repo's hook templates as the global git template dir.
+#
+# Defaults:
+#   INSTALL_DIR=/usr/local/bin
+#   SKIP_TEMPLATES=0
+#
+# Examples:
+#   ./install                                  # default: symlink into /usr/local/bin (sudo if needed)
+#   INSTALL_DIR="$HOME/.local/bin" ./install   # user-local install, no sudo
+#   SKIP_TEMPLATES=1 ./install                 # don't touch global init.templatedir
+
+set -e
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+
+mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+
+if [ -w "$INSTALL_DIR" ]; then
+    SUDO=""
+else
+    SUDO="sudo"
+fi
+
+echo "Installing scripts -> $INSTALL_DIR"
+$SUDO ln -vsf "$DIR"/scripts/* "$INSTALL_DIR/"
+
+if [ "${SKIP_TEMPLATES:-0}" != "1" ]; then
+    echo "Setting global init.templatedir -> $DIR/.git_templates"
+    git config --global init.templatedir "$DIR/.git_templates"
+fi
+
+echo "Done."

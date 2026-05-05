@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+
+current_branch=$(git branch --show-current)
+
+if [[ "$current_branch" = 'develop' || "$current_branch" = 'master' ]]; then
+    echo "Cannot push to ${current_branch}"
+    exit 1
+fi
+
