@@ -30,12 +30,15 @@ cd git-scripts
 ./install
 ```
 
-By default `install` symlinks `scripts/*` into `/usr/local/bin/` (using
-`sudo` if needed) and points `git config --global init.templatedir` at
-`.git_templates/`. Override either with env vars:
+By default `install` symlinks `scripts/*` into `~/.local/bin/` (no sudo)
+and points `git config --global init.templatedir` at `.git_templates/`.
+If `~/.local/bin` isn't on your `$PATH`, `install` prints the line to add
+to your shell rc.
+
+Override either default with an env var:
 
 ```sh
-INSTALL_DIR="$HOME/.local/bin" ./install   # user-local install, no sudo
+INSTALL_DIR=/usr/local/bin ./install       # system-wide install (sudo if needed)
 SKIP_TEMPLATES=1 ./install                 # skip the templatedir config
 ```
 
