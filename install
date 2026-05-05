@@ -4,18 +4,18 @@
 # this repo's hook templates as the global git template dir.
 #
 # Defaults:
-#   INSTALL_DIR=/usr/local/bin
+#   INSTALL_DIR=$HOME/.local/bin
 #   SKIP_TEMPLATES=0
 #
 # Examples:
-#   ./install                                  # default: symlink into /usr/local/bin (sudo if needed)
-#   INSTALL_DIR="$HOME/.local/bin" ./install   # user-local install, no sudo
+#   ./install                                  # default: symlink into ~/.local/bin (no sudo)
+#   INSTALL_DIR=/usr/local/bin ./install       # system-wide install (sudo if needed)
 #   SKIP_TEMPLATES=1 ./install                 # don't touch global init.templatedir
 
 set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 mkdir -p "$INSTALL_DIR" 2>/dev/null || true
 
@@ -32,5 +32,15 @@ if [ "${SKIP_TEMPLATES:-0}" != "1" ]; then
     echo "Setting global init.templatedir -> $DIR/.git_templates"
     git config --global init.templatedir "$DIR/.git_templates"
 fi
+
+case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *)
+        echo
+        echo "warning: $INSTALL_DIR is not on \$PATH"
+        echo "add this to your shell rc (~/.zshrc or ~/.bashrc):"
+        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+        ;;
+esac
 
 echo "Done."
